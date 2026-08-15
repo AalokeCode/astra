@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ASTRA_HOME="${ASTRA_HOME:-${HOME}/.astra}"
+ASTERISK_ROOT="${ASTERISK_ROOT:-${ASTRA_HOME}/asterisk}"
+ASTERISK_BIN="${ASTERISK_ROOT}/sbin/asterisk"
+ASTERISK_CONF="${ASTERISK_ROOT}/etc/asterisk/asterisk.conf"
+PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+WEB_ROOT="${REPO_ROOT}/web"
+RUN_DIR="${ASTRA_HOME}/run"
+LOG_DIR="${ASTRA_HOME}/logs"
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/astra <command>
+
+Commands:
+  ip       Print the Mac LAN IPv4 address used as the Android SIP domain
+  start    Start Asterisk, the Gemini gateway, and the Mac web visualizer
+  status   Show the SIP address and local service listeners
+  stop     Stop only services previously started by this script
+EOF
+}
+
+default_interface() {
+    route -n get default 2>/dev/null | awk '$1 == "interface:" { print $2; exit }'
+}
+
+sip_ip() {
+    local interface address
+    interface="$(default_interface || true)"
+    if [[ -n "$interface" ]]; then
+        address="$(ipconfig getifaddr "$interface" 2>/dev/null || true)"
+        if [[ -n "$address" ]]; then
+            printf '%s\n' "$address"
+            return 0
+        fi
+    fi
+
+    address="$(ifconfig 2>/dev/null | awk '
+        /^[a-zA-Z0-9]/ { interface=$1; sub(":$", "", interface) }
+        $1 == "inet" && $2 != "127.0.0.1" && interface !~ /^(utun|awdl|llw)/ {
+            print $2
+            exit
+        }
+    ')"
+    if [[ -n "$address" ]]; then
+        printf '%s\n' "$address"
+        return 0
+    fi
+
+    echo "error: no non-loopback IPv4 address found; connect the Mac to Wi-Fi or Ethernet" >&2
+    return 1
+}
+
+listener_pid() {
+    lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+}
+
+wait_for_port() {
+    local port="$1"
+    local attempts=0
+    while (( attempts < 40 )); do
+        if [[ -n "$(listener_pid "$port")" ]]; then
+            return 0
+        fi
+        sleep 0.25
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
+asterisk_running() {
+    [[ -x "$ASTERISK_BIN" && -f "$ASTERISK_CONF" ]] &&
+        "$ASTERISK_BIN" -rx "core show version" -C "$ASTERISK_CONF" >/dev/null 2>&1
+}
+
+require_file() {
+    if [[ ! -f "$1" ]]; then
+        echo "error: missing $1" >&2
+        exit 1
+    fi
+}
+
+require_executable() {
+    if [[ ! -x "$1" ]]; then
+        echo "error: missing executable $1" >&2
+        exit 1
+    fi
+}
+
+write_pid() {
+    printf '%s\n' "$2" > "${RUN_DIR}/$1.pid"
+}
+
+start_asterisk() {
+    if asterisk_running; then
+        echo "Asterisk         already running"
+        return
+    fi
+    require_executable "$ASTERISK_BIN"
+    require_file "$ASTERISK_CONF"
+    nohup "$ASTERISK_BIN" -f -C "$ASTERISK_CONF" \
+        >> "${LOG_DIR}/asterisk-console.log" 2>&1 &
+    local pid=$!
+    write_pid asterisk "$pid"
+
+    local attempts=0
+    while (( attempts < 40 )); do
+        if asterisk_running; then
+            echo "Asterisk         started (PID $pid, SIP UDP 5060)"
+            return
+        fi
+        sleep 0.25
+        attempts=$((attempts + 1))
+    done
+    echo "error: Asterisk did not become ready; see ${LOG_DIR}/asterisk-console.log" >&2
+    exit 1
+}
+
+start_gateway() {
+    local http_pid sip_pid
+    http_pid="$(listener_pid 8080)"
+    sip_pid="$(listener_pid 8090)"
+    if [[ -n "$http_pid" && -n "$sip_pid" ]]; then
+        echo "Gemini gateway   already running (HTTP 8080, AudioSocket 8090)"
+        return
+    fi
+    if [[ -n "$http_pid" || -n "$sip_pid" ]]; then
+        echo "error: only one gateway port is occupied; inspect ports 8080 and 8090" >&2
+        exit 1
+    fi
+
+    require_executable "$PYTHON_BIN"
+    require_file "${REPO_ROOT}/.env"
+    nohup "$PYTHON_BIN" -m app.main --serve \
+        >> "${LOG_DIR}/gateway-console.log" 2>&1 &
+    local pid=$!
+    write_pid gateway "$pid"
+    if ! wait_for_port 8080 || ! wait_for_port 8090; then
+        echo "error: Gemini gateway did not become ready; see ${LOG_DIR}/gateway-console.log" >&2
+        exit 1
+    fi
+    echo "Gemini gateway   started (PID $pid, HTTP 8080, AudioSocket 8090)"
+}
+
+start_web() {
+    local pid
+    pid="$(listener_pid 3000)"
+    if [[ -n "$pid" ]]; then
+        echo "Mac web          already running (PID $pid, port 3000)"
+        return
+    fi
+    require_file "${WEB_ROOT}/package.json"
+    if [[ ! -d "${WEB_ROOT}/node_modules" ]]; then
+        echo "error: web dependencies are missing; run 'cd web && npm install' once" >&2
+        exit 1
+    fi
+    command -v npm >/dev/null 2>&1 || {
+        echo "error: npm is not installed or not on PATH" >&2
+        exit 1
+    }
+
+    (
+        cd "$WEB_ROOT"
+        nohup npm run dev >> "${LOG_DIR}/web-console.log" 2>&1 &
+        write_pid web "$!"
+    )
+    if ! wait_for_port 3000; then
+        echo "error: Mac web did not become ready; see ${LOG_DIR}/web-console.log" >&2
+        exit 1
+    fi
+    pid="$(listener_pid 3000)"
+    echo "Mac web          started (PID $pid, http://localhost:3000)"
+}
+
+show_status() {
+    local address asterisk_state gateway_http gateway_sip web_pid
+    address="$(sip_ip)"
+    if asterisk_running; then
+        asterisk_state="running"
+    else
+        asterisk_state="stopped"
+    fi
+    gateway_http="$(listener_pid 8080)"
+    gateway_sip="$(listener_pid 8090)"
+    web_pid="$(listener_pid 3000)"
+
+    echo "Mac SIP IP       $address"
+    echo "Android domain   $address"
+    echo "Asterisk         $asterisk_state"
+    echo "Gateway HTTP     ${gateway_http:-stopped} (port 8080)"
+    echo "Gateway SIP      ${gateway_sip:-stopped} (port 8090)"
+    echo "Mac web          ${web_pid:-stopped} (http://localhost:3000)"
+}
+
+stop_owned() {
+    local name="$1"
+    local expected="$2"
+    local pid_file="${RUN_DIR}/${name}.pid"
+    local pid command_line
+    if [[ ! -f "$pid_file" ]]; then
+        echo "$name             not started by this script"
+        return
+    fi
+    pid="$(<"$pid_file")"
+    if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$pid_file"
+        echo "$name             already stopped"
+        return
+    fi
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" != *"$expected"* ]]; then
+        echo "warning: refusing to stop PID $pid for $name; command does not match" >&2
+        return
+    fi
+    kill "$pid"
+    rm -f "$pid_file"
+    echo "$name             stopped"
+}
+
+start_all() {
+    local address
+    mkdir -p "$RUN_DIR" "$LOG_DIR"
+    address="$(sip_ip)"
+    echo "Mac SIP IP       $address"
+    echo "Android domain   $address (same trusted Wi-Fi/LAN required)"
+    start_asterisk
+    start_gateway
+    start_web
+    echo "Web visualizer   http://localhost:3000"
+    open "http://localhost:3000"
+}
+
+command="${1:-}"
+case "$command" in
+    ip)
+        sip_ip
+        ;;
+    start)
+        start_all
+        ;;
+    status)
+        show_status
+        ;;
+    stop)
+        stop_owned web "npm run dev"
+        stop_owned gateway "app.main --serve"
+        stop_owned asterisk "$ASTERISK_CONF"
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

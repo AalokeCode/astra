@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ASTRA Dialer</string>
+    <string name="tile_label">ASTRA</string>
+    <string name="notification_channel">ASTRA calls</string>
+</resources>
