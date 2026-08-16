@@ -63,3 +63,5 @@ credentials.
 
 See [the voice deployment guide](docs/phone-gemini-live.md),
 [cost options](docs/voice-options.md), and [Android setup](android/README.md).
+For a complete phone, Mac, credential, and runtime removal procedure, see
+[uninstalling ASTRA](docs/uninstall.md).
