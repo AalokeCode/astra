@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import aiohttp
+import pytest
+from aiohttp import web
 
 from app.voice.gemini_live import decode_live_message
 from app.voice.phone_gateway import (
     PHONE_CONTENT_TYPE,
     PHONE_SAMPLE_RATE,
+    PhoneGateway,
     _append_transcript,
     build_gemini_setup,
     build_plivo_stream_xml,
@@ -50,6 +53,18 @@ def test_plivo_xml_rejects_non_tls_public_url():
         assert "https://" in str(exc)
     else:
         raise AssertionError("non-TLS public URL was accepted")
+
+
+def test_invalid_pstn_url_does_not_block_local_gateway_construction():
+    class Config:
+        phone_public_url = "http://127.0.0.1:8080"
+        phone_stream_token = "x" * 64
+
+    gateway = PhoneGateway(Config(), object(), quota=object())
+
+    with pytest.raises(web.HTTPServiceUnavailable) as exc_info:
+        gateway._require_public_url()
+    assert "https://" in exc_info.value.text
 
 
 def test_transcript_fragments_are_joined_readably():

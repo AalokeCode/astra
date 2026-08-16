@@ -173,8 +173,6 @@ class PhoneGateway:
             raise RuntimeError("GEMINI_API_KEY is required for live voice")
         if len(self._cfg.phone_stream_token) < 32:
             raise RuntimeError("PHONE_STREAM_TOKEN must be at least 32 characters")
-        if self._cfg.phone_public_url:
-            _stream_url(self._cfg.phone_public_url, "/phone/media", self._cfg.phone_stream_token)
 
         self._http = aiohttp.ClientSession()
         app = web.Application(client_max_size=2 * 1024 * 1024)
@@ -205,6 +203,14 @@ class PhoneGateway:
             raise web.HTTPServiceUnavailable(
                 text="PHONE_PUBLIC_URL is required for PSTN answer routes"
             )
+        try:
+            _stream_url(
+                self._cfg.phone_public_url,
+                "/phone/media",
+                self._cfg.phone_stream_token,
+            )
+        except ValueError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
         return self._cfg.phone_public_url
 
     async def _plivo_answer(self, request: web.Request) -> web.Response:
