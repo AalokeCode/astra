@@ -260,9 +260,10 @@ class GeminiLiveSession:
         await self.send_text(
             prompt
             or (
-                "The voice session connected. Briefly greet Aaloke as ASTRA in a warm, natural "
-                "way. Make it feel like reconnecting with his personal assistant, then ask how "
-                "he is or what he is working on. Vary the wording between sessions."
+                "The voice session connected. Briefly greet Aaloke, whose name is pronounced "
+                "'Ahlok', as ASTRA in a warm, natural way. Make it feel like reconnecting with "
+                "his personal assistant, then ask how he is or what he is working on. Vary the "
+                "wording between sessions."
             )
         )
 

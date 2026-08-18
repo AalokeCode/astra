@@ -1,7 +1,13 @@
 # ASTRA
 
 ASTRA is a Mac-hosted personal assistant with one Gemini Live speech-to-speech
-core and four interchangeable voice transports:
+core, a visible coding-agent workspace, and four interchangeable voice transports.
+
+The **Agents** surface can launch Claude Code and Codex in real Kitty tabs,
+show their current terminal, explain common failures, interrupt work, and send a
+normal follow-up or a steering correction. The same operations are available to
+ASTRA's natural-language tool layer, so browser voice commands and the web UI
+control the same sessions.
 
 - Browser/Mac visualizer: no telephony charge.
 - Android SIP app through local Asterisk AudioSocket: no telephony charge.
@@ -25,6 +31,16 @@ Android app. The second starts the local Asterisk server, Gemini gateway, and
 web visualizer, then opens `http://localhost:3000`. The phone must be on the
 same trusted Wi-Fi/LAN as the Mac; a private LAN address is not reachable over
 mobile data without a VPN.
+
+For the Mac web/agent workflow without Asterisk or the SIP bridge:
+
+```bash
+./scripts/astra workspace
+```
+
+This starts only the HTTP/voice gateway on port 8080 and the Next.js app on
+port 3000, then opens the browser. Choose **Agents** to launch a visible Kitty
+instance. No prompt or phone call is sent automatically.
 
 ```bash
 ./scripts/astra status
@@ -63,5 +79,7 @@ credentials.
 
 See [the voice deployment guide](docs/phone-gemini-live.md),
 [cost options](docs/voice-options.md), and [Android setup](android/README.md).
+See [the agent workspace guide](docs/agent-workspace.md) for Claude Code,
+Codex, Kitty, prompting, steering, notifications, MCP, and troubleshooting.
 For a complete phone, Mac, credential, and runtime removal procedure, see
 [uninstalling ASTRA](docs/uninstall.md).

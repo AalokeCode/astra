@@ -3,8 +3,8 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'ASTRA — Live Assistant',
-  description: 'A low-latency voice surface for the ASTRA personal assistant.',
+  title: 'ASTRA — Personal Intelligence',
+  description: 'Voice assistant and visible coding-agent workspace for ASTRA.',
 }
 
 export const viewport: Viewport = {

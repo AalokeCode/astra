@@ -18,6 +18,7 @@ Usage: ./scripts/astra <command>
 Commands:
   ip       Print the Mac LAN IPv4 address used as the Android SIP domain
   start    Start Asterisk, the Gemini gateway, and the Mac web visualizer
+  workspace Start only the HTTP gateway and Mac web/agent workspace
   status   Show the SIP address and local service listeners
   stop     Stop only services previously started by this script
 EOF
@@ -145,6 +146,27 @@ start_gateway() {
     echo "Gemini gateway   started (PID $pid, HTTP 8080, AudioSocket 8090)"
 }
 
+start_workspace_gateway() {
+    local http_pid
+    http_pid="$(listener_pid 8080)"
+    if [[ -n "$http_pid" ]]; then
+        echo "ASTRA gateway    already running (PID $http_pid, HTTP 8080)"
+        return
+    fi
+
+    require_executable "$PYTHON_BIN"
+    require_file "${REPO_ROOT}/.env"
+    nohup "$PYTHON_BIN" -m app.main --phone \
+        >> "${LOG_DIR}/gateway-console.log" 2>&1 &
+    local pid=$!
+    write_pid gateway "$pid"
+    if ! wait_for_port 8080; then
+        echo "error: ASTRA gateway did not become ready; see ${LOG_DIR}/gateway-console.log" >&2
+        exit 1
+    fi
+    echo "ASTRA gateway    started (PID $pid, HTTP 8080)"
+}
+
 start_web() {
     local pid
     pid="$(listener_pid 3000)"
@@ -233,6 +255,14 @@ start_all() {
     open "http://localhost:3000"
 }
 
+start_workspace() {
+    mkdir -p "$RUN_DIR" "$LOG_DIR"
+    start_workspace_gateway
+    start_web
+    echo "Agent workspace  http://localhost:3000"
+    open "http://localhost:3000"
+}
+
 command="${1:-}"
 case "$command" in
     ip)
@@ -241,12 +271,15 @@ case "$command" in
     start)
         start_all
         ;;
+    workspace)
+        start_workspace
+        ;;
     status)
         show_status
         ;;
     stop)
         stop_owned web "npm run dev"
-        stop_owned gateway "app.main --serve"
+        stop_owned gateway "app.main --"
         stop_owned asterisk "$ASTERISK_CONF"
         ;;
     help|-h|--help)

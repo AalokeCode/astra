@@ -18,7 +18,8 @@ import aiohttp
 from aiohttp import web
 
 from app.agent.agent import Assistant
-from app.config import Config
+from app.config import PROJECT_ROOT, Config
+from app.integrations.agent_workspace import AgentWorkspaceError, KittyAgentWorkspace
 from app.voice.audio import mulaw_to_pcm16le, pcm16le_to_mulaw, resample_pcm16le
 from app.voice.gemini_live import (
     GEMINI_OUTPUT_SAMPLE_RATE,
@@ -35,6 +36,44 @@ PHONE_SAMPLE_RATE = 24_000
 PHONE_CONTENT_TYPE = "audio/x-l16"
 PHONE_STREAM_CONTENT_TYPE = f"{PHONE_CONTENT_TYPE};rate={PHONE_SAMPLE_RATE}"
 TWILIO_SAMPLE_RATE = 8_000
+
+
+def _is_allowed_web_origin(origin: str) -> bool:
+    """Agent control is browser-accessible only from the local Mac web app."""
+    if not origin:
+        return True
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and parsed.port == 3000
+    )
+
+
+@web.middleware
+async def _agent_cors_middleware(
+    request: web.Request, handler: Any
+) -> web.StreamResponse:
+    if not request.path.startswith("/agents"):
+        return await handler(request)
+    origin = request.headers.get("Origin", "")
+    if not _is_allowed_web_origin(origin):
+        raise web.HTTPForbidden(text="agent control is available only to the local ASTRA web app")
+    headers = {
+        "Access-Control-Allow-Origin": origin or "http://localhost:3000",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+        "Access-Control-Max-Age": "600",
+        "Vary": "Origin",
+    }
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers=headers)
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        response = exc
+    response.headers.update(headers)
+    return response
 
 
 def _stream_url(public_url: str, path: str, token: str) -> str:
@@ -167,6 +206,7 @@ class PhoneGateway:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._closed = asyncio.Event()
+        self._agent_workspace: KittyAgentWorkspace | None = None
 
     async def start(self) -> None:
         if not self._cfg.gemini_api_key:
@@ -175,12 +215,34 @@ class PhoneGateway:
             raise RuntimeError("PHONE_STREAM_TOKEN must be at least 32 characters")
 
         self._http = aiohttp.ClientSession()
-        app = web.Application(client_max_size=2 * 1024 * 1024)
+        self._agent_workspace = KittyAgentWorkspace(
+            self._cfg, default_project=PROJECT_ROOT
+        )
+        app = web.Application(
+            client_max_size=2 * 1024 * 1024,
+            middlewares=[_agent_cors_middleware],
+        )
         app.router.add_route("*", "/phone/answer", self._plivo_answer)
         app.router.add_get("/phone/media", self._plivo_media)
         app.router.add_route("*", "/twilio/answer", self._twilio_answer)
         app.router.add_get("/twilio/media", self._twilio_media)
         app.router.add_get("/browser/media", self._browser_media)
+        app.router.add_route("OPTIONS", "/agents/{tail:.*}", self._agent_options)
+        app.router.add_get("/agents/status", self._agents_status)
+        app.router.add_post("/agents/instances", self._agents_launch)
+        app.router.add_post(
+            "/agents/instances/{instance_id}/prompt", self._agents_prompt
+        )
+        app.router.add_post(
+            "/agents/instances/{instance_id}/focus", self._agents_focus
+        )
+        app.router.add_post(
+            "/agents/instances/{instance_id}/interrupt", self._agents_interrupt
+        )
+        app.router.add_post("/agents/shutdown", self._agents_shutdown)
+        app.router.add_delete(
+            "/agents/instances/{instance_id}", self._agents_close
+        )
         app.router.add_get("/health", self._health)
         self._runner = web.AppRunner(app, access_log=None)
         try:
@@ -237,6 +299,135 @@ class PhoneGateway:
                 "transports": ["browser", "plivo", "twilio", "sip-audiosocket"],
             }
         )
+
+    async def _agent_options(self, request: web.Request) -> web.Response:
+        del request
+        return web.Response(status=204)
+
+    def _require_agent_token(self, request: web.Request) -> None:
+        header = request.headers.get("Authorization", "")
+        scheme, _, supplied = header.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            supplied, self._cfg.phone_stream_token
+        ):
+            raise web.HTTPUnauthorized(
+                text=json.dumps(
+                    {
+                        "error": {
+                            "code": "unauthorized",
+                            "message": "Enter the ASTRA session token in Connection settings.",
+                        }
+                    }
+                ),
+                content_type="application/json",
+            )
+
+    async def _agent_payload(self, request: web.Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise web.HTTPBadRequest(
+                text=json.dumps(
+                    {"error": {"code": "invalid_json", "message": "Send a JSON request body."}}
+                ),
+                content_type="application/json",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(
+                text=json.dumps(
+                    {"error": {"code": "invalid_body", "message": "The request body must be an object."}}
+                ),
+                content_type="application/json",
+            )
+        return payload
+
+    @staticmethod
+    def _agent_error(exc: AgentWorkspaceError) -> web.Response:
+        return web.json_response({"error": exc.as_dict()}, status=400)
+
+    def _workspace(self) -> KittyAgentWorkspace:
+        if self._agent_workspace is None:
+            raise RuntimeError("agent workspace is not initialized")
+        return self._agent_workspace
+
+    async def _agents_status(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        workspace = self._workspace()
+        capabilities, instances = await asyncio.gather(
+            asyncio.to_thread(workspace.capabilities),
+            asyncio.to_thread(workspace.list_instances),
+        )
+        return web.json_response(
+            {"capabilities": capabilities, "instances": instances}
+        )
+
+    async def _agents_launch(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        payload = await self._agent_payload(request)
+        try:
+            instance = await asyncio.to_thread(
+                self._workspace().launch,
+                str(payload.get("provider", "")),
+                str(payload.get("project_path", "")),
+                initial_prompt=(
+                    str(payload["prompt"]) if payload.get("prompt") is not None else None
+                ),
+            )
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response({"instance": instance}, status=201)
+
+    async def _agents_prompt(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        payload = await self._agent_payload(request)
+        try:
+            await asyncio.to_thread(
+                self._workspace().send_prompt,
+                request.match_info["instance_id"],
+                str(payload.get("message", "")),
+                kind=str(payload.get("mode", "prompt")),
+            )
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response({"sent": True})
+
+    async def _agents_focus(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        try:
+            await asyncio.to_thread(
+                self._workspace().focus, request.match_info["instance_id"]
+            )
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response({"focused": True})
+
+    async def _agents_interrupt(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        try:
+            await asyncio.to_thread(
+                self._workspace().interrupt, request.match_info["instance_id"]
+            )
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response({"interrupted": True})
+
+    async def _agents_close(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        try:
+            await asyncio.to_thread(
+                self._workspace().close, request.match_info["instance_id"]
+            )
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response({"closed": True})
+
+    async def _agents_shutdown(self, request: web.Request) -> web.Response:
+        self._require_agent_token(request)
+        try:
+            result = await asyncio.to_thread(self._workspace().shutdown)
+        except AgentWorkspaceError as exc:
+            return self._agent_error(exc)
+        return web.json_response(result)
 
     async def _plivo_media(self, request: web.Request) -> web.StreamResponse:
         self._require_stream_token(request)

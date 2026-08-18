@@ -15,6 +15,7 @@ from app.voice.phone_gateway import (
     build_gemini_setup,
     build_plivo_stream_xml,
     build_twilio_stream_xml,
+    _is_allowed_web_origin,
 )
 
 
@@ -106,3 +107,11 @@ def test_twilio_xml_uses_authenticated_bidirectional_stream():
 
     assert "<Connect><Stream" in xml
     assert "wss://astra.example.test/twilio/media?token=" + "b" * 64 in xml
+
+
+def test_agent_api_accepts_only_local_web_origins():
+    assert _is_allowed_web_origin("http://localhost:3000") is True
+    assert _is_allowed_web_origin("http://127.0.0.1:3000") is True
+    assert _is_allowed_web_origin("") is True
+    assert _is_allowed_web_origin("https://attacker.example") is False
+    assert _is_allowed_web_origin("http://localhost.attacker.example:3000") is False

@@ -1,8 +1,9 @@
 'use client'
 
-import { FormEvent, useMemo, useState } from 'react'
-import { ArrowUp, Mic, PhoneOff, Settings2, X } from 'lucide-react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { ArrowUp, AudioLines, Mic, PanelsTopLeft, PhoneOff, Settings2, X } from 'lucide-react'
 
+import AgentWorkspace from '@/components/agent-workspace'
 import FluidOrb from '@/components/fluid-orb'
 import { AssistantState, useLiveAssistant } from '@/hooks/use-live-assistant'
 import { cn } from '@/lib/utils'
@@ -25,20 +26,34 @@ const stateColor: Record<AssistantState, string> = {
   error: '#e86666',
 }
 
+const DEFAULT_GATEWAY_ENDPOINT = 'ws://127.0.0.1:8080/browser/media'
+
 export default function Home() {
   const assistant = useLiveAssistant()
+  const [surface, setSurface] = useState<'voice' | 'agents'>('agents')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [endpoint, setEndpoint] = useState(() =>
-    typeof window === 'undefined'
-      ? 'ws://127.0.0.1:8080/browser/media'
-      : (localStorage.getItem('astra_gateway_endpoint') ??
-        'ws://127.0.0.1:8080/browser/media'),
-  )
-  const [token, setToken] = useState(() =>
-    typeof window === 'undefined' ? '' : (sessionStorage.getItem('astra_gateway_token') ?? ''),
-  )
+  const [endpoint, setEndpoint] = useState(DEFAULT_GATEWAY_ENDPOINT)
+  const [token, setToken] = useState('')
   const [text, setText] = useState('')
   const active = !['idle', 'error'].includes(assistant.state)
+
+  useEffect(() => {
+    const restore = window.setTimeout(() => {
+      setEndpoint(localStorage.getItem('astra_gateway_endpoint') ?? DEFAULT_GATEWAY_ENDPOINT)
+      setToken(sessionStorage.getItem('astra_gateway_token') ?? '')
+    }, 0)
+    return () => window.clearTimeout(restore)
+  }, [])
+
+  const updateEndpoint = (value: string) => {
+    setEndpoint(value)
+    localStorage.setItem('astra_gateway_endpoint', value)
+  }
+
+  const updateToken = (value: string) => {
+    setToken(value)
+    sessionStorage.setItem('astra_gateway_token', value)
+  }
 
   const transcript = useMemo(() => {
     const completed = assistant.turns.at(-1)
@@ -53,8 +68,6 @@ export default function Home() {
       assistant.disconnect()
       return
     }
-    sessionStorage.setItem('astra_gateway_token', token)
-    localStorage.setItem('astra_gateway_endpoint', endpoint)
     setSettingsOpen(false)
     await assistant.connect(endpoint, token)
   }
@@ -65,20 +78,40 @@ export default function Home() {
   }
 
   return (
-    <main className="assistant-shell">
+    <main className={cn('assistant-shell', surface === 'agents' && 'is-agents')}>
       <header className="topbar">
-        <div>
+        <div className="brand-lockup">
           <p className="eyebrow">Personal intelligence</p>
           <h1>ASTRA</h1>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          aria-label={settingsOpen ? 'Close connection settings' : 'Open connection settings'}
-          onClick={() => setSettingsOpen((open) => !open)}
-        >
-          {settingsOpen ? <X size={19} /> : <Settings2 size={19} />}
-        </button>
+        <nav className="surface-switcher" aria-label="ASTRA surfaces">
+          <button
+            className={cn(surface === 'voice' && 'is-selected')}
+            type="button"
+            onClick={() => setSurface('voice')}
+          >
+            <AudioLines size={15} /> Voice
+          </button>
+          <button
+            className={cn(surface === 'agents' && 'is-selected')}
+            type="button"
+            onClick={() => setSurface('agents')}
+          >
+            <PanelsTopLeft size={15} /> Agents
+          </button>
+        </nav>
+        <div className="topbar-status">
+          <span className={cn('gateway-indicator', token.trim() && 'is-configured')} />
+          <span>{token.trim() ? 'Gateway set' : 'Not connected'}</span>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={settingsOpen ? 'Close connection settings' : 'Open connection settings'}
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            {settingsOpen ? <X size={18} /> : <Settings2 size={18} />}
+          </button>
+        </div>
       </header>
 
       {settingsOpen && (
@@ -87,7 +120,7 @@ export default function Home() {
             Gateway WebSocket
             <input
               value={endpoint}
-              onChange={(event) => setEndpoint(event.target.value)}
+              onChange={(event) => updateEndpoint(event.target.value)}
               spellCheck={false}
               autoCapitalize="none"
             />
@@ -97,75 +130,90 @@ export default function Home() {
             <input
               type="password"
               value={token}
-              onChange={(event) => setToken(event.target.value)}
+              onChange={(event) => updateToken(event.target.value)}
               autoComplete="off"
             />
           </label>
-          <p>The token stays in this browser tab. Your Gemini key remains on the Mac.</p>
+          <p>
+            The session token stays in this browser tab. Gemini, Claude, Codex, and MCP credentials
+            remain on the Mac.
+          </p>
         </section>
       )}
 
-      <section className="voice-stage" aria-live="polite">
-        <div className={cn('orb-field', `is-${assistant.state}`)}>
-          <div className="orb-halo" />
-          <FluidOrb size={312} color={stateColor[assistant.state]} />
-        </div>
-        <div className="state-line">
-          <span className={cn('state-dot', `is-${assistant.state}`)} />
-          {stateCopy[assistant.state]}
-        </div>
-        <button
-          className={cn('session-button', active && 'is-active')}
-          type="button"
-          onClick={toggleSession}
-          disabled={assistant.state === 'connecting'}
-        >
-          {active ? <PhoneOff size={19} /> : <Mic size={19} />}
-          {active ? 'End conversation' : 'Start conversation'}
-        </button>
-        {assistant.error && <p className="error-message">{assistant.error}</p>}
-      </section>
+      {surface === 'voice' ? (
+        <>
+          <section className="voice-stage" aria-live="polite">
+            <div className={cn('orb-field', `is-${assistant.state}`)}>
+              <div className="orb-halo" />
+              <FluidOrb size={312} color={stateColor[assistant.state]} />
+            </div>
+            <div className="state-line">
+              <span className={cn('state-dot', `is-${assistant.state}`)} />
+              {stateCopy[assistant.state]}
+            </div>
+            <button
+              className={cn('session-button', active && 'is-active')}
+              type="button"
+              onClick={toggleSession}
+              disabled={assistant.state === 'connecting'}
+            >
+              {active ? <PhoneOff size={19} /> : <Mic size={19} />}
+              {active ? 'End conversation' : 'Start conversation'}
+            </button>
+            {assistant.error && <p className="error-message">{assistant.error}</p>}
+          </section>
 
-      <section className="conversation" aria-label="Current conversation">
-        {transcript.user || transcript.assistant ? (
-          <>
-            {transcript.user && (
-              <div className="turn user-turn">
-                <span>You</span>
-                <p>{transcript.user}</p>
-              </div>
+          <section className="conversation" aria-label="Current conversation">
+            {transcript.user || transcript.assistant ? (
+              <>
+                {transcript.user && (
+                  <div className="turn user-turn">
+                    <span>You</span>
+                    <p>{transcript.user}</p>
+                  </div>
+                )}
+                {transcript.assistant && (
+                  <div className="turn assistant-turn">
+                    <span>ASTRA</span>
+                    <p>{transcript.assistant}</p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="empty-copy">
+                Ask naturally — including “launch Codex in this project and prompt…”
+              </p>
             )}
-            {transcript.assistant && (
-              <div className="turn assistant-turn">
-                <span>ASTRA</span>
-                <p>{transcript.assistant}</p>
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="empty-copy">Ask naturally. Interrupt whenever you need to.</p>
-        )}
-      </section>
+          </section>
 
-      <form className="text-composer" onSubmit={submitText}>
-        <label className="sr-only" htmlFor="message">
-          Message ASTRA
-        </label>
-        <input
-          id="message"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          placeholder={active ? 'Type instead…' : 'Start voice to send a message'}
-          disabled={!active}
+          <form className="text-composer" onSubmit={submitText}>
+            <label className="sr-only" htmlFor="message">
+              Message ASTRA
+            </label>
+            <input
+              id="message"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              placeholder={active ? 'Type instead…' : 'Start voice to send a message'}
+              disabled={!active}
+            />
+            <button type="submit" aria-label="Send message" disabled={!active || !text.trim()}>
+              <ArrowUp size={18} />
+            </button>
+          </form>
+        </>
+      ) : (
+        <AgentWorkspace
+          endpoint={endpoint}
+          token={token}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
-        <button type="submit" aria-label="Send message" disabled={!active || !text.trim()}>
-          <ArrowUp size={18} />
-        </button>
-      </form>
+      )}
 
       <footer>
-        <span>Gemini Live</span>
-        <span>Browser · SIP · PSTN</span>
+        <span>{surface === 'voice' ? 'Gemini Live' : 'Kitty orchestration'}</span>
+        <span>{surface === 'voice' ? 'Browser · SIP · PSTN' : 'Claude Code · Codex · native MCP'}</span>
       </footer>
     </main>
   )

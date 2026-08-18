@@ -236,6 +236,7 @@ async def test_live_voice_excludes_and_rejects_high_risk_tools(tmp_path: Path) -
     assert {item["name"] for item in definitions} == {"get_weather", "search_docs"}
     prompt = assistant.live_system_prompt()
     assert "Aaloke is a B.Tech student at Rishihood" in prompt
+    assert "pronounced 'Ahlok'" in prompt
     assert "ongoing personal assistant and technical companion" in prompt
     assert "keep the reply short and speakable" in prompt
 
